@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>OmniMetaSystem PWA</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body {
+      background: #121212;
+      color: #f0f0f0;
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    h1 { color: #00ffe0; font-size: 1.4rem; }
+    textarea, input, select, button {
+      width: 100%;
+      background: #1e1e1e;
+      color: #fff;
+      border: 1px solid #333;
+      border-radius: 0.6rem;
+      padding: 0.7rem;
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    button {
+      background: #00ffe0;
+      color: #000;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #00cfcf;
+    }
+    pre {
+      background: #1a1a1a;
+      padding: 1rem;
+      border-radius: 0.6rem;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+    }
+    li {
+      background: #1e1e1e;
+      margin-bottom: 0.5rem;
+      padding: 0.5rem;
+      border-radius: 0.5rem;
+    }
+    li button {
+      margin-top: 0.3rem;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>OmniMeta Prompt Runner + LocalDB</h1>
+
+  <select id="tier">
+    <option value="1">Tier 1 – Quick Pattern</option>
+    <option value="2">Tier 2 – Recursive Refinement</option>
+    <option value="3">Tier 3 – Task Decomp + Memory</option>
+  </select>
+
+  <textarea id="userInput" rows="4" placeholder="Enter your prompt here..."></textarea>
+  <button onclick="runPrompt()">Run</button>
+
+  <h2>Output</h2>
+  <pre id="output">// Awaiting prompt...</pre>
+
+  <h2>Save Current Session</h2>
+  <input id="saveLabel" placeholder="Label this session" />
+  <button onclick="saveSession()">Save Session</button>
+
+  <h2>Search Sessions</h2>
+  <input id="searchQuery" placeholder="Search keywords..." oninput="searchSessions()" />
+  <ul id="searchResults"></ul>
+
+  <h2>JSON Import / Export</h2>
+  <input type="file" id="jsonFile" accept=".json" />
+  <button onclick="importJSON()">Import JSON</button>
+  <button onclick="exportSessions()">Export All</button>
+  <a id="exportLink" download="omnimeta_sessions.json" style="display:none;">Download Export</a>
+  <pre id="importLog">// Status will appear here...</pre>
+
+  <script>
+    let db;
+    const initDB = () => {
+      const req = indexedDB.open("OmniMetaDB", 1);
+      req.onerror = () => alert("Failed to open DB.");
+      req.onsuccess = (e) => db = e.target.result;
+      req.onupgradeneeded = (e) => {
+        db = e.target.result;
+        db.createObjectStore("sessions", { keyPath: "id", autoIncrement: true });
+      };
+    };
+
+    const quick = (q) => `Quick Answer: "${q}"`;
+    const refine = (q) => `Draft: "${q}"\nCritique: minor issue\nRevised: better answer.`;
+    const decomp = (q) => q.includes(" and ") ? q.split(" and ").map(p => p.trim()) : [q];
+
+    const runPrompt = () => {
+      const tier = +document.getElementById("tier").value;
+      const q = document.getElementById("userInput").value.trim();
+      let result = "";
+      if (tier === 1) result = quick(q);
+      else if (tier === 2) result = refine(q);
+      else {
+        const parts = decomp(q);
+        result = "Subtasks:\n" + parts.map(p => `• ${p}\n→ ${quick(p)}`).join("\n");
+      }
+      document.getElementById("output").textContent = result;
+    };
+
+    const saveSession = () => {
+      const label = document.getElementById("saveLabel").value.trim() || "Untitled";
+      const input = document.getElementById("userInput").value;
+      const output = document.getElementById("output").textContent;
+      const record = {
+        label, input, output,
+        timestamp: new Date().toISOString(),
+        keywords: (input || "").toLowerCase().split(/\W+/).slice(0, 10)
+      };
+      const tx = db.transaction("sessions", "readwrite");
+      tx.objectStore("sessions").add(record);
+      tx.oncomplete = () => alert("Saved!");
+    };
+
+    const searchSessions = () => {
+      const q = document.getElementById("searchQuery").value.toLowerCase();
+      const tx = db.transaction("sessions", "readonly");
+      const store = tx.objectStore("sessions");
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const hits = req.result.filter(r =>
+          r.keywords.some(k => k.includes(q)) || r.label.toLowerCase().includes(q)
+        );
+        renderResults(hits);
+      };
+    };
+
+    const renderResults = (results) => {
+      const ul = document.getElementById("searchResults");
+      ul.innerHTML = "";
+      results.forEach(r => {
+        const li = document.createElement("li");
+        li.innerHTML = `<b>${r.label}</b> <br><small>${r.timestamp}</small><br>
+                        <code>${r.input.slice(0, 80)}...</code><br>
+                        <button onclick='loadSession(${r.id})'>Load</button>`;
+        ul.appendChild(li);
+      });
+    };
+
+    const loadSession = (id) => {
+      const tx = db.transaction("sessions", "readonly");
+      const req = tx.objectStore("sessions").get(id);
+      req.onsuccess = () => {
+        document.getElementById("userInput").value = req.result.input;
+        document.getElementById("output").textContent = req.result.output;
+      };
+    };
+
+    const importJSON = () => {
+      const file = document.getElementById("jsonFile").files[0];
+      if (!file) return alert("Choose a .json file.");
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const parsed = JSON.parse(e.target.result);
+          const items = Array.isArray(parsed) ? parsed : [parsed];
+          const tx = db.transaction("sessions", "readwrite");
+          const store = tx.objectStore("sessions");
+          items.forEach(item => {
+            const rec = {
+              label: item.label || "Imported",
+              input: item.input || "",
+              output: item.output || "",
+              timestamp: item.timestamp || new Date().toISOString(),
+              keywords: (item.input || "").toLowerCase().split(/\W+/).slice(0, 10)
+            };
+            store.add(rec);
+          });
+          tx.oncomplete = () => {
+            document.getElementById("importLog").textContent =
+              `✅ Imported ${items.length} session(s).`;
+          };
+        } catch (err) {
+          document.getElementById("importLog").textContent = "❌ JSON parse failed: " + err;
+        }
+      };
+      reader.readAsText(file);
+    };
+
+    const exportSessions = () => {
+      const tx = db.transaction("sessions", "readonly");
+      const store = tx.objectStore("sessions");
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const json = JSON.stringify(req.result, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.getElementById("exportLink");
+        link.href = url;
+        link.style.display = "inline";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      };
+    };
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        const swBlob = new Blob([\`
+          self.addEventListener('install', e => {
+            e.waitUntil(caches.open('omni-cache').then(cache => cache.addAll(['.'])));
+          });
+          self.addEventListener('fetch', e => {
+            e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+          });
+        \`], { type: 'text/javascript' });
+        const swURL = URL.createObjectURL(swBlob);
+        navigator.serviceWorker.register(swURL).catch(console.error);
+      });
+    }
+
+    window.onload = initDB;
+  </script>
+</body>
+</html>
